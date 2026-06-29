@@ -6,7 +6,6 @@ import (
 	"net/netip"
 
 	c "github.com/xtls/libxray/controller"
-	"github.com/xtls/libxray/dns"
 	xtun "github.com/xtls/xray-core/proxy/tun"
 )
 
@@ -27,16 +26,6 @@ type ProcessFinder interface {
 	// destPort: Destination port
 	// Returns the UID of the owning process, or -1 if not found.
 	FindProcessByConnection(network, srcIP string, srcPort int, destIP string, destPort int) int
-}
-
-func InitDns(controller DialerController, server string) {
-	dns.InitDns(server, func(fd uintptr) {
-		controller.ProtectFd(int(fd))
-	})
-}
-
-func ResetDns() {
-	dns.ResetDns()
 }
 
 func RegisterDialerController(controller DialerController) {

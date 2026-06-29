@@ -16,7 +16,7 @@
 
 依赖 git 和 go。
 
-默认情况下，编译脚本不会 clone [Xray-core](https://github.com/XTLS/Xray-core)，而是通过 Go modules 将 Xray-core 固定到 tag `v26.6.1`（Go 会记录为对应的 pseudo-version）。
+默认情况下，编译脚本不会 clone [Xray-core](https://github.com/XTLS/Xray-core)，而是通过 Go modules 将 Xray-core 固定到 tag `v26.6.27`（Go 会记录为对应的 pseudo-version）。
 传入可选参数 `local` 时，会通过 Go module `replace` 改用已有的本地仓库 `../Xray-core`。
 
 ### 使用方式
@@ -81,10 +81,6 @@ winget install BrechtSanders.WinLibs.POSIX.UCRT
 ## controller
 
 用于解决 Android 上 socket protect 问题。
-
-## dns
-
-用于解决 Android，Linux，Windows 的服务器地址解析问题。若不处理，该 DNS 流量将被重新发送至 tun 设备，导致无法发起连接。
 
 ## geo
 
