@@ -16,7 +16,7 @@
 
 依赖 git 和 go。
 
-默认情况下，编译脚本不会 clone [Xray-core](https://github.com/XTLS/Xray-core)，而是通过 Go modules 将 Xray-core 固定到 tag `v26.6.27`（Go 会记录为对应的 pseudo-version）。
+默认情况下，编译脚本不会 clone [Xray-core](https://github.com/XTLS/Xray-core)，而是通过 Go modules 的 pseudo-version 将 Xray-core 固定到发布版本 `v26.7.11`。
 传入可选参数 `local` 时，会通过 Go module `replace` 改用已有的本地仓库 `../Xray-core`。
 
 ### 使用方式
@@ -69,13 +69,75 @@ python3 build/main.py windows local
 
 ### Windows
 
-依赖 MinGW 。
+依赖 LLVM MinGW 。
 
-你可使用 winget 安装 [LLVM MinGW](https://github.com/mstorsjo/llvm-mingw) 或 [WinLibs](https://github.com/brechtsanders/winlibs_mingw) 。
+你可使用 winget 安装 [LLVM MinGW](https://github.com/mstorsjo/llvm-mingw)。
 
 ```shell
 winget install MartinStorsjo.LLVM-MinGW.UCRT
-winget install BrechtSanders.WinLibs.POSIX.UCRT
+```
+
+## API
+
+libXray 只暴露一个结构化入口：
+
+```go
+func Invoke(requestJSON string) string
+```
+
+C 导出为：
+
+```c
+char* CGoInvoke(char* requestJSON);
+void CGoFree(char* value);
+```
+
+`CGoInvoke` 会分配返回值。调用方必须使用 `CGoFree` 释放每个非空返回值，
+不要直接使用平台分配器释放。
+
+请求是 JSON 对象：
+
+```json
+{
+  "apiVersion": 1,
+  "method": "runXray",
+  "payload": {
+    "configPath": "/path/to/config.json"
+  }
+}
+```
+
+响应是 JSON 对象：
+
+```json
+{
+  "success": true,
+  "data": {},
+  "error": ""
+}
+```
+
+设计决定：
+
+1. 顶层 `env` 字段会被忽略且不会生效。Xray-core 运行时环境项应写入 Xray 配置根 `env` 对象。
+2. `SetTunFd` 已删除。如果 fd 只能在运行时获得，请在调用 `runXray` 前把 `xray.tun.fd` 写入 Xray 配置根 `env` 对象。
+3. `countGeoData` 不依赖 Xray 配置，因此通过 method payload 的 `datDir` 传入数据目录。
+4. 完整的 UTF-8 编码 Invoke 请求和响应 JSON 包体限制为 16 MiB。任一方向超过限制时，Invoke 将返回 `success: false`、`data: null` 和对应的大小限制错误。
+
+支持的 method：
+
+```text
+getFreePorts
+convertShareLinksToXrayJson
+convertXrayJsonToShareLinks
+countGeoData
+ping
+testXray
+runXray
+runXrayFromJson
+stopXray
+xrayVersion
+getXrayState
 ```
 
 ## controller
@@ -87,10 +149,6 @@ winget install BrechtSanders.WinLibs.POSIX.UCRT
 ### count
 
 读取 geo 文件，并对分类和规则进行计数。
-
-### read
-
-读取 Xray Json 配置，提取使用到的 geo 文件名。
 
 ## main
 
@@ -109,10 +167,6 @@ winget install BrechtSanders.WinLibs.POSIX.UCRT
 ### measure
 
 对 Xray 配置进行测速。
-
-### model
-
-包装接口的响应体。
 
 ### port
 
@@ -192,15 +246,6 @@ http://localhost:49227/debug/vars
 ### xray
 
 启动和停止 Xray 实例。
-
-
-## nodep_wrapper
-
-导出 nodep 。
-
-### xray_wrapper
-
-导出 xray 。
 
 # 致谢
 
