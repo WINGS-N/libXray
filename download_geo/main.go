@@ -28,13 +28,18 @@ func ensureDir(dir string) error {
 	return nil
 }
 
+// downloadTimeout bounds one geo file download.
+const downloadTimeout = 90 * time.Second
+
 func downloadFileIfNotExists(url string, writePath string) error {
 	if _, err := os.Stat(writePath); err == nil {
 		fmt.Printf("File already exists: %s, skipping download.\n", writePath)
 		return nil
 	}
 
-	client := http.Client{}
+	// Without a deadline a dead network hangs the whole build instead of
+	// reporting that the geo files could not be fetched.
+	client := http.Client{Timeout: downloadTimeout}
 	resp, err := client.Get(url)
 	if err != nil {
 		return err

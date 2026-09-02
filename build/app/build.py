@@ -1,4 +1,5 @@
 import os.path
+import shutil
 import subprocess
 
 from app.cmd import (
@@ -114,45 +115,54 @@ class Builder(object):
             raise Exception("download_geo failed")
 
     def prepare_gomobile(self):
-        result = subprocess.run(
-            [
-                "go",
-                "list",
-                "-m",
-                "-f",
-                "{{.Version}}",
-                "golang.org/x/mobile@latest",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        version = result.stdout.strip()
-        if result.returncode != 0 or not version:
-            raise Exception("resolve latest gomobile version failed")
+        # With GOPROXY=off the toolchain is expected to be in place already, so
+        # every step that exists only to fetch it is skipped rather than failing
+        # the build on a machine with no network.
+        offline = os.environ.get("GOPROXY") == "off"
+        if not offline:
+            result = subprocess.run(
+                [
+                    "go",
+                    "list",
+                    "-m",
+                    "-f",
+                    "{{.Version}}",
+                    "golang.org/x/mobile@latest",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            version = result.stdout.strip()
+            if result.returncode != 0 or not version:
+                raise Exception("resolve latest gomobile version failed")
 
-        ret = subprocess.run(
-            [
-                "go",
-                "get",
-                "-tool",
-                f"golang.org/x/mobile/cmd/gobind@{version}",
-            ]
-        )
-        if ret.returncode != 0:
-            raise Exception("add gobind tool dependency failed")
+            ret = subprocess.run(
+                [
+                    "go",
+                    "get",
+                    "-tool",
+                    f"golang.org/x/mobile/cmd/gobind@{version}",
+                ]
+            )
+            if ret.returncode != 0:
+                raise Exception("add gobind tool dependency failed")
 
-        ret = subprocess.run(
-            [
-                "go",
-                "install",
-                f"golang.org/x/mobile/cmd/gomobile@{version}",
-            ]
-        )
-        if ret.returncode != 0:
-            raise Exception("go install gomobile failed")
-        ret = subprocess.run(["gomobile", "init"])
-        if ret.returncode != 0:
-            raise Exception("gomobile init failed")
+            ret = subprocess.run(
+                [
+                    "go",
+                    "install",
+                    f"golang.org/x/mobile/cmd/gomobile@{version}",
+                ]
+            )
+            if ret.returncode != 0:
+                raise Exception("go install gomobile failed")
+
+        # `gomobile init` builds gobind by fetching it, so with no network it is
+        # skipped when a gobind binary is already on PATH.
+        if not (offline and shutil.which("gobind")):
+            ret = subprocess.run(["gomobile", "init"])
+            if ret.returncode != 0:
+                raise Exception("gomobile init failed")
 
     def prepare_static_lib(self):
         main_file = os.path.join(self.lib_dir, "cgo_bridge", "main.go")
