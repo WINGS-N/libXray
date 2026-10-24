@@ -6,13 +6,19 @@ from app.cmd import create_dir_if_not_exists, delete_dir_if_exists
 
 
 class LinuxBuilder(Builder):
-    def __init__(self, build_dir: str, use_local_xray_core: bool = False):
-        super().__init__(build_dir, use_local_xray_core)
+    def __init__(
+        self,
+        build_dir: str,
+        use_local_xray_core: bool = False,
+        keep_go_env_snapshot: bool = True,
+    ):
+        super().__init__(build_dir, use_local_xray_core, keep_go_env_snapshot)
         self.framework_dir = os.path.join(self.lib_dir, "linux_so")
         delete_dir_if_exists(self.framework_dir)
         create_dir_if_not_exists(self.framework_dir)
         self.lib_file = "libXray.so"
         self.lib_header_file = "libXray.h"
+        self.bin_file = "xray"
 
     def before_build(self):
         super().before_build()
@@ -23,11 +29,9 @@ class LinuxBuilder(Builder):
         try:
             self.before_build()
             self.build_linux()
+            self.build_desktop_bin(self.bin_file)
         finally:
-            try:
-                self.after_build()
-            finally:
-                self.restore_go_env()
+            self.restore_go_env()
 
     def build_linux(self):
         output_dir = self.framework_dir

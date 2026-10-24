@@ -40,7 +40,7 @@ Compile script. It is recommended to always use this script to compile libXray. 
 
 depends on git and go.
 
-By default, the build script does not clone [Xray-core](https://github.com/XTLS/Xray-core). It uses Go modules and pins Xray-core to release tag `v26.7.11` through its pseudo-version.
+By default, the build script does not clone [Xray-core](https://github.com/XTLS/Xray-core). It uses Go modules and pins Xray-core to release tag `v26.10.21` through its pseudo-version.
 Pass the optional `local` argument to use an existing local checkout at `../Xray-core` through a Go module `replace`.
 
 ### Usage
@@ -66,6 +66,58 @@ python3 build/main.py windows local
 
 ```
 
+Builds snapshot and restore `go.mod` and `go.sum` on success or failure by default.
+Pass `--no-snapshot` to skip both the snapshot and restoration. Before initializing
+Go dependencies, the script deletes existing `go.mod` and `go.sum` and creates a
+fresh module. The resulting files are retained even if the build fails.
+This option is supported by every target
+and can be combined with `local` in either order:
+
+```shell
+python3 build/main.py android --no-snapshot
+python3 build/main.py apple go local --no-snapshot
+```
+
+Gomobile builds
+resolve `latest` by default; set `LIBXRAY_GOMOBILE_VERSION` to select a Go module
+version. Both `gomobile` and `gobind` use that resolved version.
+
+Linux and Windows builds also produce `bin/xray` or `bin/xray.exe`. This
+session Core protects Go DNS lookups from the VPN route and accepts only:
+
+```shell
+xray run -dns <IP:port> -interface <name> -config <xray.json> [-error-file <path>]
+```
+
+The `-dns`, `-interface`, and `-config` options are required. `-dns` must be an IP endpoint, and `-config`
+points directly to the Xray JSON configuration.
+
+The optional `-error-file` also writes command failures to a UTF-8 file before
+exiting, preserving the same error printed to stderr. The file is cleared before
+running; a successful run leaves it empty. Its parent directory must exist.
+Callers launching an elevated Core should create the file first under their own
+account so they retain read access. This is an error-return channel, not Xray's
+access/error log configuration, and it does not add a separate validation pass.
+Applications using this option must bundle a desktop Core built with its support.
+
+> [!WARNING]
+> **Use only one Go runtime per process.** Go does not support loading multiple
+> independently built Go runtimes into one process. Every native libXray
+> artifact embeds a Go runtime, whether it is produced through cgo or gomobile.
+> Do not load libXray together with another independently built Go, cgo, or
+> gomobile library in the same executable or process. Doing so can fail during
+> build, link, or load, or crash during runtime initialization before
+> application code runs.
+> If one process needs Go packages from several libraries, include those
+> packages in the same Go build or `gomobile bind` invocation and produce one
+> native artifact so they share a runtime. Merely repackaging or merging
+> independently built frameworks, archives, AARs, shared libraries, or DLLs is
+> not sufficient. Separate OS processes may each load one Go runtime, so apply
+> this rule independently to each process. See
+> [Go #18976](https://github.com/golang/go/issues/18976#issuecomment-308505600),
+> [golang/go#15956](https://github.com/golang/go/issues/15956#issuecomment-373709423),
+> and [libXray #116](https://github.com/XTLS/libXray/issues/116).
+
 ### Android
 
 use [gomobile](https://github.com/golang/mobile) .
@@ -76,7 +128,8 @@ use [gomobile](https://github.com/golang/mobile) .
 
 Need "iOS Simulator Runtime".
 
-This is the best choice for general scenarios and will not conflict with other frameworks.
+This is the best choice for general scenarios. The cross-platform single-runtime
+restriction above still applies when linking other Go-based libraries.
 
 Supports iOS, iOSSimulator, macOS, macCatalyst.
 
@@ -101,13 +154,10 @@ depend on gcc and g++.
 
 ### Windows
 
-depend on LLVM MinGW.
+Depends on gcc and g++ in `PATH`.
 
-you can use winget to install [LLVM MinGW](https://github.com/mstorsjo/llvm-mingw).
-
-```shell
-winget install MartinStorsjo.LLVM-MinGW.UCRT
-```
+Native amd64 and arm64 builds are supported. The release workflow builds each
+architecture on its matching GitHub-hosted Windows runner.
 
 ## API
 
@@ -131,10 +181,10 @@ The request is a JSON object:
 
 ```json
 {
-  "apiVersion": 1,
+  "apiVersion": 3,
   "method": "runXray",
   "payload": {
-    "configPath": "/path/to/config.json"
+    "xrayJson": "{\"outbounds\":[...]}"
   }
 }
 ```
@@ -151,28 +201,55 @@ The response is a JSON object:
 
 Design notes:
 
-1. A top-level `env` field is ignored and has no effect. Xray-core runtime
+1. Invoke accepts only `apiVersion: 3`; the API version remains fixed at 3.
+   Contract changes require synchronized consumers and documentation within
+   that version. Xray configurations are passed as UTF-8 JSON text in
+   `xrayJson`; libXray does not read configuration file paths.
+2. A top-level `env` field is ignored and has no effect. Xray-core runtime
    environment options belong in the root `env` object of the Xray config.
-2. `SetTunFd` has been removed. When the fd is only known at runtime, write
+3. `SetTunFd` has been removed. When the fd is only known at runtime, write
    `xray.tun.fd` into the Xray config root `env` object before calling
    `runXray`.
-3. `countGeoData` is not backed by an Xray config, so its `datDir` is passed in
+4. `countGeoData` is not backed by an Xray config, so its `datDir` is passed in
    the method payload.
-4. The complete UTF-8 encoded Invoke request and response JSON envelopes are
+5. The complete UTF-8 encoded Invoke request and response JSON envelopes are
    limited to 16 MiB. If either limit is exceeded, Invoke returns a failure
    response with `success: false`, `data: null`, and a size-limit error.
+6. `convertShareLinksToXrayJson` validates each parsed outbound with the current
+   Xray-core config builder. Invalid outbounds are omitted, and the method fails
+   if none remain. Validation does not create or start an Xray instance.
+   Xray JSON input is treated as a node source: only its root `outbounds` are
+   retained, and all other root fields are ignored. The response contains only
+   fields supported by libXray share links; unsupported and generated empty
+   fields are omitted. Opaque XHTTP `extra` and FinalMask mask `settings` JSON
+   remain unchanged.
+   Every successful response contains only the projected `outbounds` list.
+   Its optional `age.secretKey` decrypts official age ASCII armor in memory
+   before the existing parser runs. Plaintext input remains unchanged.
+7. Xray-core keeps its system dialer DNS client and outbound manager in
+   process-wide state. `pingBatch`, `testXray`, and their exported Go
+   entrypoints take the managed lifecycle lock and reject an active `runXray`
+   instance before loading/building config.
+   A batch holds the lock through all workers and temporary-core close. This
+   also serializes these operations with one another. Instances
+   created outside the managed APIs are not detected or restored; callers
+   requiring overlap with them must still use separate processes.
+8. `decodeSubscriptionText` returns the complete plaintext after optional Age
+   decryption. It does not parse subscription formats, project outbounds or
+   construct an Xray instance; callers own classification and validation.
 
 Supported methods:
 
 ```text
 getFreePorts
+decodeSubscriptionText
 convertShareLinksToXrayJson
 convertXrayJsonToShareLinks
+generateAgeKeyPair
 countGeoData
-ping
+pingBatch
 testXray
 runXray
-runXrayFromJson
 stopXray
 xrayVersion
 getXrayState
@@ -180,7 +257,47 @@ getXrayState
 
 ## controller
 
+### Socket protect
+
 Used to solve the socket protect problem on Android.
+
+### DNS resolver
+
+Android may expose a loopback DNS server to Go's resolver while a VPN is
+active. Call `SetDNS` before `runXray` to make Go use the DNS server selected by
+the VPN configuration and protect the DNS socket from the VPN tunnel. The
+server must be an IP endpoint with a port, such as `8.8.8.8:53` or
+`[2001:4860:4860::8888]:53`.
+
+Call `ResetDNS` after Xray has stopped. These APIs are available only in the
+Android artifact and change the process-wide Go resolver.
+
+```java
+LibXray.setDNS(controller, "8.8.8.8:53");
+LibXray.invoke(runXrayRequest);
+
+// Later, when stopping the core:
+LibXray.invoke(stopXrayRequest);
+LibXray.resetDNS();
+```
+
+### Process finder (per-app routing)
+
+`ConnectivityManager.getConnectionOwnerUid()` is API 30+. On older Android
+libXray falls back to parsing `/proc/net/{tcp,udp}{,6}` in pure Go.
+
+Usage (Java/Kotlin):
+
+```java
+ProcessFinder finder = new ProcessFinder() {
+    @Override
+    public long findProcessByConnection(String network, String srcIP, long srcPort,
+                                         String destIP, long destPort) {
+        return -1; // return UID or -1
+    }
+};
+LibXray.registerProcessFinder(finder, Build.VERSION.SDK_INT);
+```
 
 ## geo
 
@@ -208,29 +325,174 @@ Speed ​​test the Xray configuration.
 
 ### port
 
-Get free ports.
+`getFreePorts` returns distinct free TCP ports on localhost. Its payload accepts
+`count` and an optional `excludePorts` list of caller-reserved port numbers:
+
+```json
+{
+  "apiVersion": 3,
+  "method": "getFreePorts",
+  "payload": {"count": 2, "excludePorts": [18587, 9000]}
+}
+```
+
+The response keeps the existing `data.ports` integer array. Omit `excludePorts`
+or pass an empty list for no exclusions; duplicates have no additional effect.
+Excluded ports must be between 1 and 65535. Negative or impossible counts fail;
+zero returns no ports. The Go entrypoint is
+`nodep.GetFreePorts(count int, excludePorts []int)`; pass `nil` for no exclusions.
+
+Listeners remain open during selection to avoid duplicates or repeatedly picking
+an excluded port, and close before the function returns, including on failure.
+The returned ports are therefore candidates, not reservations: another process
+can claim them before the caller binds. This checks TCP only, not UDP.
 
 ## share
 
-libXray uses `sendThrough` to store outbound names.
-
-### clash_meta
-
-Parse Clash.Meta configuration.
+libXray stores outbound names in `tag`. `sendThrough` keeps its native Xray
+meaning as the local bind address.
 
 ### generate_share
 
-convert Xray Json to VMessAEAD/VLESS sharing protocol.
+Convert Xray JSON to VMessAEAD / VLESS share links following
+[Xray-core discussion #716](https://github.com/XTLS/Xray-core/discussions/716).
+Hysteria2, SS, SOCKS and Trojan share links are also supported. VMess always generates
+an AEAD URI, not the legacy QR-code format.
+
+Outbounds without a supported share-link format are skipped. Conversion fails
+if no share links can be generated.
 
 ### parse_share
 
-convert VMessAEAD/VLESS sharing protocol to Xray Json.
+Parse VMessAEAD / VLESS, Hysteria2, SS, SOCKS and Trojan share links into Xray JSON.
+Legacy VMessQrCode links (`vmess://Base64(JSON)`) are not supported.
 
-convert VMessQRCode to Xray Json.
+Xray JSON node input and Base64 / Age subscription wrappers remain supported.
+Clash/Mihomo configurations remain unsupported.
 
-### vmess
+Hysteria2 accepts `hysteria2://` and `hy2://` using the
+[official URI scheme](https://v2.hysteria.network/docs/developers/URI-Scheme/):
+optional authentication, default port 443, IPv6, SNI, Salamander obfuscation,
+multi-port authorities and fragment names. Export uses `hysteria2://`.
+Port hopping uses Core's `finalmask.udp` with both local and remote interval
+hopping (30 seconds by default; `hop-interval` must be at least 5 seconds).
+Legacy `ports` / `mport` queries are accepted and exported as authority ports.
+Legacy `up` / `down` values are imported as client-local QUIC tuning, not exported.
 
-convert VMessQRCode to Xray Json.
+TLS is mandatory. `insecure=true` / `allowInsecure=true` and `pinSHA256` are
+rejected: the bundled Core cannot preserve those Hysteria TLS semantics.
+Explicit Xray `fp`, `alpn`, `ech`, `pcs` and `vcn` extensions retain their Xray
+meaning. Export rejects TLS/mask settings that cannot be represented, rather
+than silently dropping security or obfuscation. Client-local QUIC tuning is
+not part of the URI. Realm and Gecko are not supported. Hopping requires a
+direct UDP socket; this does not add hopping support over chained proxies.
+
+VMessAEAD / VLESS field mappings follow the
+[Xray share-link proposal](https://github.com/XTLS/Xray-core/discussions/716)
+where supported by the bundled Core:
+
+- mKCP `mtu` and `tti` are preserved in both directions. Omitted values use
+  Core defaults; Core validates their ranges. Legacy KCP `seed` and `headerType`
+  are not imported or exported.
+- XHTTP `extra` keeps its complete JSON content, including nested settings.
+  `fm` carries FinalMask masks and all Core-supported `quicParams` fields.
+- TLS `ech`, `pcs`, `vcn` and REALITY `pbk`, `sid`, `pqv`, `spx` are preserved
+  alongside `sni`, `fp` and TLS `alpn`. An omitted `sni` uses the remote host,
+  not the WebSocket HTTP host.
+- Native transport aliases retain their settings when exported. RAW/TCP links
+  use `type=tcp`; query values use percent-encoded spaces.
+- gRPC supports `gun` and `multi`. The bundled Core does not support `guna`
+  mode or the removed HTTP/QUIC transports; these are not silently substituted.
+
+#### Parsing result
+
+`convertShareLinksToXrayJson` has one response shape. Its payload contains
+`text` and optional `age`. Every successful conversion returns
+`data: {"outbounds":[...]}`. There is no statistics or nested config wrapper.
+
+Invalid individual elements are skipped without discarding other valid nodes.
+The list preserves source order and includes only projected, buildable outbounds.
+No per-node hash comparison, deduplication or failed-node counting is performed.
+
+No usable nodes, an unrecognized format, a malformed document, an invalid
+container or a decryption failure returns `success: false` with `data: null`.
+Error text never includes rejected candidates or decrypted subscription text.
+Callers must not import/replace a subscription when no usable nodes remain.
+
+### decodeSubscriptionText
+
+Returns the complete subscription text, including full Xray JSON objects or
+arrays and their DNS, routing, balancers and unknown fields. This method only
+unwraps Age armor: unencrypted text, including URI lists and Base64 strings,
+is returned exactly as supplied. It does not validate JSON or decode Base64.
+
+```json
+{
+  "apiVersion": 3,
+  "method": "decodeSubscriptionText",
+  "payload": {
+    "text": "-----BEGIN AGE ENCRYPTED FILE-----\n...",
+    "age": {
+      "secretKey": "AGE-SECRET-KEY-1..."
+    }
+  }
+}
+```
+
+Success returns `data: {"text": "<complete plaintext>"}`; the `text` field is
+present even for empty text. Errors return `data: null` and the existing Age
+key, armor, decryption or plaintext-size error. Both unencrypted and decrypted
+plaintext are limited to 16 MiB of UTF-8 bytes. The complete Invoke request and
+encoded response retain their separate 16 MiB limits, so envelope or escaping
+overhead can reject text below the plaintext limit. The Go helper is
+`share.DecodeSubscriptionText(text, secretKey)`.
+
+The caller must classify the returned text before importing nodes or storing a
+complete configuration. This method does not create a temporary Core and can
+be called while a managed instance is running.
+
+### age-encrypted subscriptions
+
+`decodeSubscriptionText` and `convertShareLinksToXrayJson` accept an optional
+native age secret key. Only
+X25519 (`AGE-SECRET-KEY-1...`) and ML-KEM-768 + X25519 hybrid
+(`AGE-SECRET-KEY-PQ-1...`) identities are accepted. Recognized age armor is
+decrypted in memory and limited to 16 MiB of plaintext.
+
+```json
+{
+  "apiVersion": 3,
+  "method": "convertShareLinksToXrayJson",
+  "payload": {
+    "text": "-----BEGIN AGE ENCRYPTED FILE-----\n...",
+    "age": {
+      "secretKey": "AGE-SECRET-KEY-1..."
+    }
+  }
+}
+```
+
+Generate a new keypair with `keyType` set to `x25519` or `hybrid`. An omitted
+`keyType` defaults to `x25519`. The `hybrid` option matches Mihomo
+`age keygen-pq` and produces an `AGE-SECRET-KEY-PQ-1...` identity with an
+`age1pq1...` recipient.
+
+```json
+{
+  "apiVersion": 3,
+  "method": "generateAgeKeyPair",
+  "payload": {
+    "keyType": "x25519"
+  }
+}
+```
+
+The response contains both `secretKey` and `publicKey`. The integrating
+application must persist the pair and send only `publicKey` as
+`X-Age-Public-Key`. libXray does not perform the subscription HTTP request,
+persist keys, or add headers. Applications must never send the secret key over
+HTTP or log secret keys or decrypted subscription text. Configuration
+persistence belongs to the integrating application.
 
 ### xray_json
 
@@ -238,9 +500,89 @@ Some tools used to parse shared links.
 
 ## xray
 
-### ping
+### pingBatch
 
-Latency testing.
+Tests multiple outbound configurations concurrently in one temporary Xray
+instance. Each `xrayJson` string is parsed only for its `outbounds`; all other
+root fields are ignored. The target outbound is selected by `outboundTag`, then
+by the `proxy` tag, and finally by the first outbound.
+
+```json
+{
+  "apiVersion": 3,
+  "method": "pingBatch",
+  "payload": {
+    "configs": [
+      {
+        "xrayJson": "{\"outbounds\":[...]}"
+      },
+      {
+        "xrayJson": "{\"outbounds\":[...]}",
+        "outboundTag": "media"
+      }
+    ],
+    "timeout": 5,
+    "url": "https://cp.cloudflare.com/"
+  }
+}
+```
+
+Each request accepts at most five configurations and tests all accepted
+configurations concurrently. Requests containing more than five configurations
+fail before any configuration is tested.
+
+The top-level response succeeds when the batch itself was accepted. Each item
+has its own result; `delay` is `10000` for an error and `11000` for a timeout.
+`delay` is always present, including a successful zero-millisecond result.
+The result array has the same length and order as the input config array.
+Outbound dependencies referenced by `streamSettings.sockopt.dialerProxy` are
+included automatically. Xray-core rejects the removed `proxySettings` field.
+
+Each prepared item sends one latency HEAD through its selected outbound and
+dependencies, using the configured timeout. Its result contains only
+`success`, `delay` and an optional `error`. Invalid outbound configurations
+retain their per-item failure and do not send a request.
+
+### testXray
+
+Loads the supplied JSON text and constructs a temporary Xray instance. The
+payload contains only `xrayJson`; success returns `data: {}`:
+
+```json
+{
+  "apiVersion": 3,
+  "method": "testXray",
+  "payload": {
+    "xrayJson": "{\"outbounds\":[...]}"
+  }
+}
+```
+
+The Go entrypoint `TestXray` calls `newXrayInstance` (`core.LoadConfig` followed
+by `core.New`) and closes the successfully constructed instance before returning.
+It never calls `Start` or publishes a managed instance. Core construction errors,
+including invalid routing matchers and missing balancers, and close errors are
+returned through the normal error response.
+
+This is not a sandbox. Builders and constructors may read local GeoData and
+certificates, apply `env`, replace process-global logging/DNS state, create log
+files, or initialize protocol-specific resources and background tasks. Process
+state is not restored. In particular, WireGuard can acquire a TUN during
+construction and VLESS reverse can schedule background work. The current Core
+does not return its partial instance when construction fails, so libXray cannot
+close that partial instance. Core-managed geodata cron does not run without
+`Start`, although its asset declarations still check local files.
+
+Callers may provide a minimal configuration or remove App-managed fields from a
+disposable validation copy; libXray applies no App-specific filtering. Only the
+supplied configuration is checked. Success establishes instance construction and
+close, not listener/TUN startup, system permissions, or network connectivity.
+Callers must handle actual startup failures.
+
+### runXray
+
+Starts the managed Xray instance from the supplied JSON text. Use `stopXray`
+to stop that instance. `runXrayFromJson` is no longer a separate method.
 
 ### metrics
 
@@ -270,11 +612,9 @@ when `listen` is `127.0.0.1:49227`, read:
 http://localhost:49227/debug/vars
 ```
 
-Note:
-
-1. When testing latency or validating configuration, make sure `metrics` is `null`.
-
-2. Metrics only needs the `listen` field in this wrapper. Query `/debug/vars` directly with an HTTP client instead of going through libXray.
+Metrics only needs the `listen` field in this wrapper. Query `/debug/vars`
+directly with an HTTP client instead of going through libXray. Counters belong
+to the current Xray instance; libXray does not sample or persist traffic.
 
 ### validation
 
@@ -291,6 +631,8 @@ Start and stop Xray instances.
 [VMessPing](https://github.com/v2fly/vmessping)
 
 [FreePort](https://github.com/phayes/freeport)
+
+[MetaCubeX age](https://github.com/MetaCubeX/age) (BSD 3-Clause)
 
 # License
 

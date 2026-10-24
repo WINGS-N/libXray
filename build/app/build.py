@@ -3,22 +3,29 @@ import shutil
 import subprocess
 
 from app.cmd import (
+    create_dir_if_not_exists,
     delete_file_if_exists,
     delete_dir_if_exists,
 )
 
 LIBXRAY_MOD_NAME = "github.com/xtls/libxray"
 XRAY_CORE_MOD_NAME = "github.com/xtls/xray-core"
-# Go modules resolve the Xray-core v26.7.11 release tag through this version.
-DEFAULT_XRAY_CORE_VERSION = "v1.260327.1-0.20260711155151-50231eaff98c"
+# Go modules resolve the Xray-core v26.10.21 release tag through this version.
+DEFAULT_XRAY_CORE_VERSION = "v1.260327.1-0.20261021115930-1b1647cd9ddf"
 LOCAL_XRAY_CORE_DIR_NAME = "Xray-core"
 
 
 class Builder(object):
-    def __init__(self, build_dir: str, use_local_xray_core: bool = False):
+    def __init__(
+        self,
+        build_dir: str,
+        use_local_xray_core: bool = False,
+        keep_go_env_snapshot: bool = True,
+    ):
         self.build_dir = build_dir
         self.lib_dir = os.path.abspath(os.path.join(self.build_dir, ".."))
         self.use_local_xray_core = use_local_xray_core
+        self.keep_go_env_snapshot = keep_go_env_snapshot
         self.xray_core_replace_path = f"../{LOCAL_XRAY_CORE_DIR_NAME}"
         self.xray_core_dir = os.path.abspath(
             os.path.join(self.lib_dir, self.xray_core_replace_path)
@@ -26,6 +33,8 @@ class Builder(object):
         self._go_env_snapshot = None
 
     def snapshot_go_env(self):
+        if not self.keep_go_env_snapshot:
+            return
         paths = [
             os.path.join(self.lib_dir, "go.mod"),
             os.path.join(self.lib_dir, "go.sum"),
@@ -68,6 +77,8 @@ class Builder(object):
 
     def init_go_env(self):
         os.chdir(self.lib_dir)
+        if not self.keep_go_env_snapshot:
+            self.clean_lib_files(["go.mod", "go.sum"])
         if not os.path.exists(os.path.join(self.lib_dir, "go.mod")):
             ret = subprocess.run(["go", "mod", "init", LIBXRAY_MOD_NAME])
             if ret.returncode != 0:
@@ -120,6 +131,7 @@ class Builder(object):
         # the build on a machine with no network.
         offline = os.environ.get("GOPROXY") == "off"
         if not offline:
+            requested_version = os.environ.get("LIBXRAY_GOMOBILE_VERSION") or "latest"
             result = subprocess.run(
                 [
                     "go",
@@ -127,14 +139,14 @@ class Builder(object):
                     "-m",
                     "-f",
                     "{{.Version}}",
-                    "golang.org/x/mobile@latest",
+                    f"golang.org/x/mobile@{requested_version}",
                 ],
                 capture_output=True,
                 text=True,
             )
             version = result.stdout.strip()
             if result.returncode != 0 or not version:
-                raise Exception("resolve latest gomobile version failed")
+                raise Exception("resolve gomobile version failed")
 
             ret = subprocess.run(
                 [
@@ -172,13 +184,31 @@ class Builder(object):
     def main_package(self) -> str:
         return "./cgo_bridge"
 
+    def build_desktop_bin(self, file_name: str):
+        output_dir = os.path.join(self.lib_dir, "bin")
+        create_dir_if_not_exists(output_dir)
+        output_file = os.path.join(output_dir, file_name)
+        run_env = os.environ.copy()
+        run_env["CGO_ENABLED"] = "0"
+        cmd = [
+            "go",
+            "build",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags",
+            "-s -w -buildid=",
+            f"-o={output_file}",
+            "./desktop_bin",
+        ]
+        print(cmd)
+        ret = subprocess.run(cmd, cwd=self.lib_dir, env=run_env)
+        if ret.returncode != 0:
+            raise Exception("build_desktop_bin failed")
+
     def before_build(self):
         self.prepare_xray_core()
         self.init_go_env()
         self.download_geo()
 
     def build(self):
-        pass
-
-    def after_build(self):
         pass

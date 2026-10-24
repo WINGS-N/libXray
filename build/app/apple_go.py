@@ -21,8 +21,13 @@ class AppleTarget(object):
 
 
 class AppleGoBuilder(Builder):
-    def __init__(self, build_dir: str, use_local_xray_core: bool = False):
-        super().__init__(build_dir, use_local_xray_core)
+    def __init__(
+        self,
+        build_dir: str,
+        use_local_xray_core: bool = False,
+        keep_go_env_snapshot: bool = True,
+    ):
+        super().__init__(build_dir, use_local_xray_core, keep_go_env_snapshot)
         self.framework_dir = os.path.join(self.lib_dir, "apple_xcframework")
         delete_dir_if_exists(self.framework_dir)
         create_dir_if_not_exists(self.framework_dir)
@@ -54,21 +59,20 @@ class AppleGoBuilder(Builder):
             ),
         ]
 
-        # keep same with flutter
         self.macos_targets = [
             AppleTarget(
                 "darwin",
                 "amd64",
                 "x86_64",
                 "macosx",
-                "10.14",
+                "12.0",
             ),
             AppleTarget(
                 "darwin",
                 "arm64",
                 "arm64",
                 "macosx",
-                "10.14",
+                "12.0",
             ),
         ]
 
@@ -126,10 +130,7 @@ class AppleGoBuilder(Builder):
             self.create_include_dir()
             self.create_framework()
         finally:
-            try:
-                self.after_build()
-            finally:
-                self.restore_go_env()
+            self.restore_go_env()
 
     def build_targets(self, targets: list[AppleTarget]):
         for target in targets:

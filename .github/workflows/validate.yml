@@ -16,11 +16,17 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
+          check-latest: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
           check-latest: true
 
       - name: Download modules
@@ -32,11 +38,12 @@ jobs:
       - name: Test with race detector
         run: go test -race ./... -count=1 -timeout 15m
 
-      - name: Build Linux C ABI
+      - name: Build Linux artifacts
         run: |
           python3 build/main.py linux
           grep -q 'CGoFree' linux_so/libXray.h
           nm -D linux_so/libXray.so | grep -q ' CGoFree$'
+          ./bin/xray -h
 
       - name: Verify source was restored
         run: git diff --exit-code
